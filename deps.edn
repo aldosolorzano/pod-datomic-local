@@ -1,0 +1,27 @@
+{:paths ["src"]
+ :deps  {org.clojure/clojure {:mvn/version "1.11.0"}
+         com.datomic/local {:mvn/version "1.0.285"}
+         nrepl/bencode {:mvn/version "1.1.0"}
+         babashka/babashka.pods {:git/url "https://github.com/babashka/babashka.pods"
+                                 :git/sha "28cf3de4ef2f31258ca24112c69f49e3d9165ea1"}
+         com.cognitect/transit-clj {:mvn/version "1.0.329"}}
+
+ :aliases {:native {:jvm-opts   ["-Dclojure.compiler.direct-linking=true"]
+                    :extra-deps {com.github.clj-easy/graal-config-cheshire {:git/url   "https://github.com/clj-easy/graal-config"
+                                                                            :git/sha   "0dc2862e1b1c9871eef4c306ef77da3610a2bd93"
+                                                                            :deps/root "config/cheshire/cheshire"}
+                                 com.github.clj-easy/graal-build-time      {:mvn/version "0.1.4"}}}
+
+           :build ;; added by neil
+           {:deps {io.github.clojure/tools.build {:git/tag "v0.8.3" :git/sha "0d20256"}}
+            :ns-default build}
+           :test
+           {:extra-deps
+            {com.cognitect/test-runner
+             {:git/url "https://github.com/cognitect-labs/test-runner"
+              :sha "cb96e80f6f3d3b307c59cbeb49bb0dcb3a2a780b"}
+             babashka/babashka.pods
+             {:git/url "https://github.com/babashka/babashka.pods"
+              :sha "feb48af75f60a4e31bfb434eb7321fd93c4a31cb"}}}
+           :extra-paths ["test"]
+           :main-opts ["-m" "cognitect.test-runner"]}}
