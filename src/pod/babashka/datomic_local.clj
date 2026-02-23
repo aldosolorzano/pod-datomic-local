@@ -10,43 +10,209 @@
    [java.io EOFException])
   (:gen-class))
 
+(set! *warn-on-reflection* true)
+
+;; =============================================================================
+;; I/O Infrastructure
+;; =============================================================================
+
 (def stdin (PushbackInputStream. System/in))
+(def stdout System/out)
+(def stderr System/err)
 
-(defn write [v]
-  (bencode/write-bencode System/out v)
-  (.flush System/out))
-
-(defn read-string [^"[B" v]
-  (String. v))
-
-(defn read-transit [^String v]
-  (transit/read
-   (transit/reader
-    (java.io.ByteArrayInputStream. (.getBytes v "utf-8"))
-    :json)))
-
-(defn write-transit [v]
-  (let [baos (java.io.ByteArrayOutputStream.)]
-    (transit/write (transit/writer baos :json) v)
-    (.toString baos "utf-8")))
-
-(defn read []
-  (bencode/read-bencode stdin))
-
-(def debug? false)
+(def debug? true)
 
 (defn debug [& strs]
   (when debug?
     (binding [*out* (io/writer System/err)]
-      (apply println strs))))
+      (apply prn strs))))
 
-(def client dl/client)
-(def connect dl/connect)
-(def create-database dl/create-database)
-(def delete-database dl/delete-database)
-(def transact dl/transact)
-(def q dl/q)
-(def db dl/db)
+(defn write
+  "Write a bencoded value `v` to stdout (default) or to the provided output `stream`.
+
+  This is the primary output function for emitting values over the pod protocol.
+
+  Notes:
+  - Uses `bencode/write-bencode` for serialization.
+  - Calls `flush` to ensure the bytes are pushed to the underlying stream promptly."
+  ([v] (write stdout v))
+  ([stream v]
+   (debug :writing v)
+   (bencode/write-bencode stream v)
+   (flush)))
+
+(defn write-err
+  "Write a bencoded value `v` to stderr (default) or to the provided output `stream`.
+
+  This is typically used for emitting error/debug output without interfering with the
+  normal stdout channel used by the pod protocol.
+
+  Notes:
+  - Uses `bencode/write-bencode` for serialization.
+  - Calls `flush` to ensure the bytes are pushed to the underlying stream promptly."
+  ([v] (write stderr v))
+  ([stream v]
+   (debug :writing v)
+   (bencode/write-bencode stream v)
+   (flush)))
+
+(defn read-string
+  "Convert a Java byte array (`byte[]`, hinted here as `\"[B\"`) into a `String`
+  using the platform default charset.
+
+  Prefer using an explicit charset (e.g. UTF-8) when the encoding is known, but this
+  function preserves the current behavior."
+  [^"[B" v]
+  (String. v))
+
+(defn read
+  "Read and decode a single bencoded value from `stream` using `bencode/read-bencode`."
+  [stream]
+  (bencode/read-bencode stream))
+
+(defn read-transit
+  "Decode a Transit-JSON encoded string `v` into a Clojure value.
+
+  Implementation details:
+  - Encodes `v` as UTF-8 bytes and reads it via a `ByteArrayInputStream`.
+  - Uses Transit `:json` format."
+  [^String v]
+  (transit/read
+    (transit/reader
+      (java.io.ByteArrayInputStream. (.getBytes v "utf-8"))
+      :json)))
+
+(defn write-transit
+  "Encode a Clojure value `v` as a Transit-JSON string (UTF-8).
+
+  Returns the resulting string."
+  [v]
+  (let [baos (java.io.ByteArrayOutputStream.)]
+    (transit/write (transit/writer baos :json) v)
+    (.toString baos "utf-8")))
+
+
+;; =============================================================================
+;; Datomic client API
+;; =============================================================================
+
+(def tansform-tx-data (partial mapv (fn [dat] [(.e dat) (.a dat) (.v dat) (.tOp dat)])))
+
+
+(def client-system
+  "Atom that holds the Datomic Client state
+
+   :client - Datomic client instance
+   :conn - The connection that will be used as argument for transact and q
+
+   No support for :db-before and :db-after yet."
+  (atom {}))
+
+(defn client
+  "Create a Datomic Local client and store it in the shared `client-system` atom.
+
+  Returns a map with client:
+
+    {:client <A client object>}
+
+  Notes:
+  - This function mutates global state via `swap!` on `client-system`."
+  [args]
+  (do (swap! client-system assoc :client (dl/client args))
+    {:client (str (get @client-system :client))}))
+
+(defn connect
+  "Connect to a Datomic database using the client stored in `client-system`.
+
+  Looks up the existing client from `client-system` under `:client`, then calls
+  `datomic.client.api/connect` (aliased here as `dl/connect`) with that client and `args`.
+  The resulting connection is stored under `:conn` in `client-system`.
+
+  Returns an empty map `{}`.
+
+  Notes:
+  - This function requires `client` to have been called successfully beforehand.
+  - This function mutates global state via `swap!` on `client-system`."
+  [args]
+  (let [client (get @client-system :client)]
+    (swap! client-system assoc :conn (dl/connect client args)) {}))
+
+(defn create-database
+  "Create a Datomic database using the client stored in `client-system`.
+
+  Looks up the existing client from `client-system` under `:client`, then calls
+  `datomic.client.api/create-database` (aliased here as `dl/create-database`) with that
+  client and `args`.
+
+  Returns an empty map `{}`.
+
+  Notes:
+  - This function requires `client` to have been called successfully beforehand."
+  [args]
+  (let [client (get @client-system :client)]
+    (dl/create-database client args) {}))
+
+(defn delete-database
+  "Delete a Datomic database using the value stored in `client-system` under `:conn`.
+
+  Calls `datomic.client.api/delete-database` (aliased here as `dl/delete-database`) with
+  the stored value and `args`.
+
+  Returns whatever `dl/delete-database` returns.
+
+  Notes:
+  - This function reads from `client-system` and does not update it."
+  [args]
+  (let [client (get @client-system :conn)]
+    (dl/delete-database client args)))
+
+(defn transact
+  "Submit a transaction using the connection stored in `client-system`.
+
+  Looks up the connection from `client-system` under `:conn`, then calls
+  `datomic.client.api/transact` (aliased here as `dl/transact`) with that connection and `args`.
+
+  Post-processes the returned transaction report by:
+  - Converting `:db-after` and `:db-before` values to strings (via `str`)
+  - Transforming `:tx-data` with `tansform-tx-data`
+
+  Returns the transformed transaction report map.
+
+  Notes:
+  - This function requires `connect` to have been called successfully beforehand."
+  [args]
+  (let [client (get @client-system :conn)
+        tx (dl/transact client args)]
+    (-> tx
+      (update :db-after str)
+      (update :db-before str)
+      (update :tx-data tansform-tx-data))))
+
+(defn q
+  "Runs a Datomic query against the current local connection.
+
+  This is a small convenience wrapper around `datomic.client.api/q` that
+  automatically supplies the database value from your active connection in
+  `client-system`.
+
+  **Behavior**
+  - Reads the connection from `@client-system` at key `:conn`
+  - Calls `dl/db` on that connection to obtain a database value
+  - Executes `dl/q` with the provided `query` against that database
+
+  **Parameters**
+  - `query`: A Datomic query form (map or list style). If your query requires
+    inputs, those inputs must already be included in the `query` value (this
+    wrapper only accepts a single argument).
+
+  **Returns**
+  - The query result as returned by `dl/q` (typically a set of tuples).
+
+  **Notes**
+  - If `client-system` is not initialized, does not contain `:conn`, or the
+    connection is invalid, this function will throw when `dl/db`/`dl/q` is called."
+  [query]
+  (dl/q query (dl/db (get @client-system :conn))))
 
 (def lookup
   {'pod.babashka.datomic-local/client client
@@ -54,23 +220,27 @@
    'pod.babashka.datomic-local/create-database create-database
    'pod.babashka.datomic-local/delete-database delete-database
    'pod.babashka.datomic-local/transact transact
-   'pod.babashka.datomic-local/q q
-   'pod.babashka.datomic-local/db db})
+   'pod.babashka.datomic-local/q q})
+
+
+;; =============================================================================
+;; Pod Runner
+;; =============================================================================
 
 (defn main
   [& _args]
   (pr-str "starting")
   (loop []
     (let [message (try
-                    (read)
+                    (read stdin)
                     (catch EOFException _ ::EOF))]
       (when-not (identical? ::EOF message)
         (let [op (-> message
-                     (get "op")
-                     read-string
-                     keyword)
+                   (get "op")
+                   read-string
+                   keyword)
               id (some-> (get message "id")
-                         read-string)
+                   read-string)
               id (or id "unknown")]
           (case op
             :describe (do
@@ -80,7 +250,6 @@
                                                        {"name" "client"}
                                                        {"name" "connect"}
                                                        {"name" "q"}
-                                                       {"name" "db"}
                                                        {"name" "transact"}
                                                        {"name" "delete-database"}]}]
                                 "id" id
@@ -89,13 +258,13 @@
             :invoke   (do
                         (try
                           (let [var (-> message
-                                        (get "var")
-                                        read-string
-                                        symbol)
+                                      (get "var")
+                                      (read-string)
+                                      symbol)
                                 args (-> message
-                                         (get "args")
-                                         read-string
-                                         read-transit)]
+                                       (get "args")
+                                       (read-string)
+                                       (read-transit))]
                             (if-let [f (lookup var)]
                               (let [result (apply f args)
                                     value (write-transit result)
@@ -105,14 +274,14 @@
                                 (write reply))
                               (throw (ex-info (str "Var not found: " var) {}))))
                           (catch Throwable e
-                            (binding [*out* *err*]
-                              (println e))
+                            (debug e)
                             (let [reply {"ex-message" (ex-message e)
                                          "ex-data" (write-transit
-                                                     (assoc (ex-data e) :type (class e)))
+                                                     (assoc (ex-data e)
+                                                       :type (str (class e))))
                                          "id" id
                                          "status" ["done" "error"]}]
-                              (write reply))))
+                              (write stdout reply))))
                         (recur))
             :shutdown (System/exit 0)
             (do
@@ -122,7 +291,6 @@
                            "status"     ["done" "error"]}]
                 (write reply))
               (recur))))))))
-
 
 (defn -main [& _args]
   (main))
