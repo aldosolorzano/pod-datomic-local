@@ -4,7 +4,7 @@
    [bencode.core :as bencode]
    [cognitect.transit :as transit]
    [clojure.java.io :as io]
-   [datomic.client.api :as dl])
+   [datomic.client.api :as d])
   (:import
    [java.io PushbackInputStream]
    [java.io EOFException])
@@ -78,9 +78,9 @@
   - Uses Transit `:json` format."
   [^String v]
   (transit/read
-    (transit/reader
-      (java.io.ByteArrayInputStream. (.getBytes v "utf-8"))
-      :json)))
+   (transit/reader
+    (java.io.ByteArrayInputStream. (.getBytes v "utf-8"))
+    :json)))
 
 (defn write-transit
   "Encode a Clojure value `v` as a Transit-JSON string (UTF-8).
@@ -91,13 +91,13 @@
     (transit/write (transit/writer baos :json) v)
     (.toString baos "utf-8")))
 
-
 ;; =============================================================================
 ;; Datomic client API
 ;; =============================================================================
 
-(def tansform-tx-data (partial mapv (fn [dat] [(.e dat) (.a dat) (.v dat) (.tOp dat)])))
+(defn serialize-datum [dat] [(.e dat) (.a dat) (.v dat) (.tOp dat)])
 
+(def tansform-tx-data (partial mapv (fn [dat] [(serialize-datum dat)])))
 
 (def client-system
   "Atom that holds the Datomic Client state
@@ -118,14 +118,14 @@
   Notes:
   - This function mutates global state via `swap!` on `client-system`."
   [args]
-  (do (swap! client-system assoc :client (dl/client args))
-    {:client (str (get @client-system :client))}))
+  (do (swap! client-system assoc :client (d/client args))
+      {:client (str (get @client-system :client))}))
 
 (defn connect
   "Connect to a Datomic database using the client stored in `client-system`.
 
   Looks up the existing client from `client-system` under `:client`, then calls
-  `datomic.client.api/connect` (aliased here as `dl/connect`) with that client and `args`.
+  `datomic.client.api/connect` (aliased here as `d/connect`) with that client and `args`.
   The resulting connection is stored under `:conn` in `client-system`.
 
   Returns an empty map `{}`.
@@ -135,13 +135,13 @@
   - This function mutates global state via `swap!` on `client-system`."
   [args]
   (let [client (get @client-system :client)]
-    (swap! client-system assoc :conn (dl/connect client args)) {}))
+    (swap! client-system assoc :conn (d/connect client args)) {}))
 
 (defn create-database
   "Create a Datomic database using the client stored in `client-system`.
 
   Looks up the existing client from `client-system` under `:client`, then calls
-  `datomic.client.api/create-database` (aliased here as `dl/create-database`) with that
+  `datomic.client.api/create-database` (aliased here as `d/create-database`) with that
   client and `args`.
 
   Returns an empty map `{}`.
@@ -150,27 +150,27 @@
   - This function requires `client` to have been called successfully beforehand."
   [args]
   (let [client (get @client-system :client)]
-    (dl/create-database client args) {}))
+    (d/create-database client args) {}))
 
 (defn delete-database
   "Delete a Datomic database using the value stored in `client-system` under `:conn`.
 
-  Calls `datomic.client.api/delete-database` (aliased here as `dl/delete-database`) with
+  Calls `datomic.client.api/delete-database` (aliased here as `d/delete-database`) with
   the stored value and `args`.
 
-  Returns whatever `dl/delete-database` returns.
+  Returns whatever `d/delete-database` returns.
 
   Notes:
   - This function reads from `client-system` and does not update it."
   [args]
   (let [client (get @client-system :conn)]
-    (dl/delete-database client args)))
+    (d/delete-database client args)))
 
 (defn transact
   "Submit a transaction using the connection stored in `client-system`.
 
   Looks up the connection from `client-system` under `:conn`, then calls
-  `datomic.client.api/transact` (aliased here as `dl/transact`) with that connection and `args`.
+  `datomic.client.api/transact` (aliased here as `d/transact`) with that connection and `args`.
 
   Post-processes the returned transaction report by:
   - Converting `:db-after` and `:db-before` values to strings (via `str`)
@@ -182,11 +182,11 @@
   - This function requires `connect` to have been called successfully beforehand."
   [args]
   (let [client (get @client-system :conn)
-        tx (dl/transact client args)]
+        tx (d/transact client args)]
     (-> tx
-      (update :db-after str)
-      (update :db-before str)
-      (update :tx-data tansform-tx-data))))
+        (update :db-after str)
+        (update :db-before str)
+        (update :tx-data tansform-tx-data))))
 
 (defn q
   "Runs a Datomic query against the current local connection.
@@ -197,8 +197,8 @@
 
   **Behavior**
   - Reads the connection from `@client-system` at key `:conn`
-  - Calls `dl/db` on that connection to obtain a database value
-  - Executes `dl/q` with the provided `query` against that database
+  - Calls `d/db` on that connection to obtain a database value
+  - Executes `d/q` with the provided `query` against that database
 
   **Parameters**
   - `query`: A Datomic query form (map or list style). If your query requires
@@ -206,13 +206,24 @@
     wrapper only accepts a single argument).
 
   **Returns**
-  - The query result as returned by `dl/q` (typically a set of tuples).
+  - The query result as returned by `d/q` (typically a set of tuples).
 
   **Notes**
   - If `client-system` is not initialized, does not contain `:conn`, or the
-    connection is invalid, this function will throw when `dl/db`/`dl/q` is called."
+    connection is invalid, this function will throw when `d/db`/`d/q` is called."
   [query]
-  (dl/q query (dl/db (get @client-system :conn))))
+  (d/q query (d/db (get @client-system :conn))))
+
+(defn q-history
+  "A read-only, historical view of the current Datomic database.
+
+  This is defined by calling `d/q-history` on the database value returned from calling `d/db` to the
+  active connection stored under `:conn` in `client-system`.
+
+  It will expose all historical assertions/retractions (depending on how you query),
+  rather than only the latest state."
+  [query]
+  (d/q query (d/history (d/db (get @client-system :conn)))))
 
 (def lookup
   {'pod.babashka.datomic-local/client client
@@ -220,8 +231,8 @@
    'pod.babashka.datomic-local/create-database create-database
    'pod.babashka.datomic-local/delete-database delete-database
    'pod.babashka.datomic-local/transact transact
-   'pod.babashka.datomic-local/q q})
-
+   'pod.babashka.datomic-local/q q
+   'pod.babashka.datomic-local/q-history q-history})
 
 ;; =============================================================================
 ;; Pod Runner
@@ -236,11 +247,11 @@
                     (catch EOFException _ ::EOF))]
       (when-not (identical? ::EOF message)
         (let [op (-> message
-                   (get "op")
-                   read-string
-                   keyword)
+                     (get "op")
+                     read-string
+                     keyword)
               id (some-> (get message "id")
-                   read-string)
+                         read-string)
               id (or id "unknown")]
           (case op
             :describe (do
@@ -251,20 +262,21 @@
                                                        {"name" "connect"}
                                                        {"name" "q"}
                                                        {"name" "transact"}
-                                                       {"name" "delete-database"}]}]
+                                                       {"name" "delete-database"}
+                                                       {"name" "q-history"}]}]
                                 "id" id
                                 "ops" {"shutdown" {}}})
                         (recur))
             :invoke   (do
                         (try
                           (let [var (-> message
-                                      (get "var")
-                                      (read-string)
-                                      symbol)
+                                        (get "var")
+                                        (read-string)
+                                        symbol)
                                 args (-> message
-                                       (get "args")
-                                       (read-string)
-                                       (read-transit))]
+                                         (get "args")
+                                         (read-string)
+                                         (read-transit))]
                             (if-let [f (lookup var)]
                               (let [result (apply f args)
                                     value (write-transit result)
@@ -277,8 +289,8 @@
                             (debug e)
                             (let [reply {"ex-message" (ex-message e)
                                          "ex-data" (write-transit
-                                                     (assoc (ex-data e)
-                                                       :type (str (class e))))
+                                                    (assoc (ex-data e)
+                                                           :type (str (class e))))
                                          "id" id
                                          "status" ["done" "error"]}]
                               (write stdout reply))))
