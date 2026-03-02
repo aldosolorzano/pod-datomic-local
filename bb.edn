@@ -1,6 +1,6 @@
 {:tasks
- {test           {:doc "Run the tests"
-                  :task (clojure "-X:test")}
+ {test {:doc "Run the tests"
+        :task (clojure "-X:test")}
 
-  format:check   (shell "clj -Tcljfmt check")
-  format         (shell "clj -Tcljfmt fix")}}
+  format:check (shell "clj -Tcljfmt check")
+  format (shell "clj -Tcljfmt fix")}}
