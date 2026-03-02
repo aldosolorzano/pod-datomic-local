@@ -121,6 +121,11 @@
   (do (swap! client-system assoc :client (d/client args))
       {:client (str (get @client-system :client))}))
 
+(defn list-databases
+  [args]
+  (let [client (get @client-system :client)]
+    (d/list-databases client args)))
+
 (defn connect
   "Connect to a Datomic database using the client stored in `client-system`.
 
@@ -163,7 +168,7 @@
   Notes:
   - This function reads from `client-system` and does not update it."
   [args]
-  (let [client (get @client-system :conn)]
+  (let [client (get @client-system :client)]
     (d/delete-database client args)))
 
 (defn transact
@@ -225,6 +230,44 @@
   [query]
   (d/q query (d/history (d/db (get @client-system :conn)))))
 
+(defn q-as-of
+  "Executes a Datomic query against a historical view of the current database.
+
+  This function obtains the current `db` value from the active connection stored
+  in `client-system` (under `:conn`), then creates an `as-of` database value at
+  `time-point`, and finally runs `query` via `d/q`.
+
+  Parameters:
+  - `query`: A Datomic Datalog query (and any required inputs as part of the
+    query form, per `d/q` conventions).
+  - `time-point`: A point-in-time used to construct the historical database
+    value. Typically a transaction time/tx id accepted by `d/as-of`.
+
+  Returns:
+  - The result of `(d/q query (d/as-of db time-point))`."
+  [query time-point]
+  (let [db (d/db (get @client-system :conn))]
+    (d/q query (d/as-of db time-point))))
+
+(defn q-since
+  "Executes a Datomic query against a database view including changes since a given point.
+
+  This function obtains the current `db` value from the active connection stored
+  in `client-system` (under `:conn`), then creates a `since` database value from
+  `time-point`, and finally runs `query` via `d/q`.
+
+  Parameters:
+  - `query`: A Datomic Datalog query (and any required inputs as part of the
+    query form, per `d/q` conventions).
+  - `time-point`: A point-in-time used to construct the `since` database value.
+    Typically a transaction time/tx id accepted by `d/since`.
+
+  Returns:
+  - The result of `(d/q query (d/since db time-point))`."
+  [query time-point]
+  (let [db (d/db (get @client-system :conn))]
+    (d/q query (d/since db time-point))))
+
 (def lookup
   {'pod.babashka.datomic-local/client client
    'pod.babashka.datomic-local/connect connect
@@ -232,7 +275,10 @@
    'pod.babashka.datomic-local/delete-database delete-database
    'pod.babashka.datomic-local/transact transact
    'pod.babashka.datomic-local/q q
-   'pod.babashka.datomic-local/q-history q-history})
+   'pod.babashka.datomic-local/q-history q-history
+   'pod.babashka.datomic-local/q-since q-since
+   'pod.babashka.datomic-local/q-as-of q-as-of
+   'pod.babashka.datomic-local/list-databases list-databases})
 
 ;; =============================================================================
 ;; Pod Runner
@@ -261,9 +307,12 @@
                                                        {"name" "client"}
                                                        {"name" "connect"}
                                                        {"name" "q"}
+                                                       {"name" "q-history"}
+                                                       {"name" "q-as-of"}
+                                                       {"name" "q-since"}
                                                        {"name" "transact"}
                                                        {"name" "delete-database"}
-                                                       {"name" "q-history"}]}]
+                                                       {"name" "list-databases"}]}]
                                 "id" id
                                 "ops" {"shutdown" {}}})
                         (recur))

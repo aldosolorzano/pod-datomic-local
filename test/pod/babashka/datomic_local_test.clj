@@ -66,11 +66,13 @@
       (let [_tx (dl/transact {:tx-data first-movies})]
         (is (= [["Command"] ["The Goonies"] ["Repo Man"]]
                (dl/q movies-query)))))
+
     (testing ":db/add with tx-map collection"
       (let [_tx-retract (dl/transact {:tx-data [[:db/add [:movie/sku "SKU-2"] :movie/title "Commando"]
                                                 [:db/add "datomic.tx" :db/doc "fix typo"]]})]
         (is (= [["Commando"] ["The Goonies"] ["Repo Man"]]
                (dl/q movies-query)))))
+
     (testing "query history of movie titles"
       (is (= [[13194139533319 "SKU-3" "Repo Man" true]
               [13194139533319 "SKU-2" "Command" true]
@@ -82,11 +84,33 @@
                      :where
                      [?movie :movie/title ?val ?tx ?op]
                      [?movie :movie/sku ?sku]])
-                  (sort-by first)))))))
+                  (sort-by first)))))
+
+    (testing "query with as-of"
+      ;Going back when the typo existed "Command"
+      (is (= [["Command"]]
+             (dl/q-as-of '[:find ?title
+                           :where
+                           [?movie :movie/title ?title]
+                           [?movie :movie/sku "SKU-2"]]
+                         13194139533319))))
+
+    (testing "query with since"
+      ;datoms added by transactions after that point in time.
+      (is (= [["Commando"]]
+             (dl/q-since movies-query 13194139533319))))))
+
+(deftest list-databases-test
+  (is (= ["movies"] (dl/list-databases {}))))
 
 (comment
   (def all-titles-q '[:find ?movie-title
                       :where [_ :movie/title ?movie-title]])
+  (def client2 (d/client {:server-type :datomic-local
+                          :storage-dir :mem
+                          :system "pod"}))
+  (class client2)
+  (d/list-databases client2 {})
   (d/transact conn {:tx-data movie-schema})
   (dl/transact {:tx-data first-movies})
   (d/history (d/db conn)))
